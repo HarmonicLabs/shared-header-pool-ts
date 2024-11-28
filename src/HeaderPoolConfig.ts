@@ -14,6 +14,9 @@ export const defaultConfig: HeaderPoolReaderArgs = Object.freeze({
 
 export interface HeaderPoolConfig extends HeaderPoolReaderArgs
 {
+    readonly desiredPeers: number,
+    readonly maxHeaderSize: number,
+
     readonly size: SupportedHeaderPoolSize,
     readonly maxPeers: number,
     readonly allHashesSize: number

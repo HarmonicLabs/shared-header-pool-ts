@@ -2,6 +2,7 @@ import { HeaderPoolWriteResult } from "./types/HeaderPoolWriteResult";
 import { isSupportedHeaderPoolSize } from "./types/SupportedHeaderPoolSize";
 import { HeaderPoolConfig } from "./HeaderPoolConfig";
 import { HASH_SIZE, N_HEADERS_I32_IDX, PERFORMING_DROP, WRITING_PEERS_I32_IDX } from "./constants";
+import { uint8ArrayEq } from "@harmoniclabs/uint8array-utils";
 
 export class HeaderPoolWriter
 {
@@ -49,18 +50,43 @@ export class HeaderPoolWriter
         }
         this._incrementWritingPeers();
 
-        const idx = this._getWriteIndex();
-        if( idx >= this.config.maxPeers )
+        const nHeaders = this._readNHeaders();
+        if( nHeaders >= this.config.maxPeers )
         {
             this._decrementWritingPeers();
             return HeaderPoolWriteResult.InsufficientSpace;
         }
+        if( this._isHashPresent( hash, nHeaders ) )
+        {
+            this._decrementWritingPeers();
+            return HeaderPoolWriteResult.Duplicate;
+        }
+
+        // increments nHeaders
+        const idx = this._getWriteIndex();
 
         this.u8View.set( hash, this.config.startHashesU8 + (idx * HASH_SIZE) );
         this.u8View.set( header, this.config.startHeadersU8 + (idx * this.config.maxHeaderSize) );
 
         this._decrementWritingPeers();
         return HeaderPoolWriteResult.Ok;
+    }
+
+    private _isHashPresent( hash: Uint8Array, nHeaders: number ): boolean
+    {
+        for( let i = 0; i < nHeaders; )
+        {
+            if(
+                uint8ArrayEq(
+                    hash,
+                    this.u8View.subarray(
+                        this.config.startHashesU8 + (i * HASH_SIZE),
+                        this.config.startHashesU8 + ((++i) * HASH_SIZE)
+                    )
+                )
+            ) return true
+        }
+        return false;
     }
 
     private _makeSureNoDrop(): void | Promise<void>
@@ -77,6 +103,11 @@ export class HeaderPoolWriter
         );
         if( async ) return value as unknown as Promise<void>;
         return;
+    }
+
+    private _readNHeaders(): number
+    {
+        return Atomics.load( this.u32View, N_HEADERS_I32_IDX );
     }
 
     private _getWriteIndex(): number
