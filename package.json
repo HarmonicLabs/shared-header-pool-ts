@@ -1,6 +1,6 @@
 {
-  "name": "@harmoniclabs/shared-cardano-mempool-ts",
-  "version": "0.0.0",
+  "name": "@harmoniclabs/shared-header-pool-ts",
+  "version": "0.0.0-dev0",
   "description": "implementation of the cardano mempool based on SharedArrayBuffer in typescript",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -44,7 +44,7 @@
   },
   "homepage": "https://github.com/HarmonicLabs/plu-ts#readme",
   "dependencies": {
-    "@harmoniclabs/uint8array-utils": "^1.0.0"
+    "@harmoniclabs/uint8array-utils": "^1.0.3"
   },
   "devDependencies": {
     "@babel/preset-env": "^7.18.6",
