@@ -2,6 +2,8 @@
 
 Here you find a typescript implementation for a shared pool of headers necessary for the ouroboros consensus implementation in typescript.
 
+![notes](./img/notes.jpeg)
+
 ## design differences from mempool
 
 The design is inspired by the [`shared-cardano-mempool-ts`](https://github.com/HarmonicLabs/shared-cardano-mempool-ts), with some key differences.

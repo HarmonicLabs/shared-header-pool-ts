@@ -1,8 +1,19 @@
 import { HeaderPoolWriteResult } from "./types/HeaderPoolWriteResult";
 import { isSupportedHeaderPoolSize } from "./types/SupportedHeaderPoolSize";
 import { HeaderPoolConfig } from "./HeaderPoolConfig";
-import { HASH_SIZE, N_HEADERS_I32_IDX, PERFORMING_DROP, WRITING_PEERS_I32_IDX } from "./constants";
+import { HASH_SIZE, N_HEADERS_I32_IDX, PERFORMING_DROP, TIP_BLOCK_NO_I32_IDX, WRITING_PEERS_I32_IDX } from "./constants";
 import { uint8ArrayEq } from "@harmoniclabs/uint8array-utils";
+import { unwrapWaitAsyncResult } from "./utils/unwrapWaitAsyncResult";
+
+type VoidCb = () => void;
+
+export interface HeaderPoolWriterEvents {
+    free: VoidCb[];
+}
+
+export type HeaderPoolWriterEventName = keyof HeaderPoolWriterEvents;
+
+export type HeaderPoolWriterEventCb = HeaderPoolWriterEvents[HeaderPoolWriterEventName][number];
 
 export class HeaderPoolWriter
 {
@@ -14,6 +25,14 @@ export class HeaderPoolWriter
     private readonly u8View: Uint8Array;
     readonly config: HeaderPoolConfig;
 
+    private readonly _onceEvents: HeaderPoolWriterEvents = Object.freeze({
+        free: []
+    });
+
+    private readonly _onEvents: HeaderPoolWriterEvents = Object.freeze({
+        free: []
+    });
+    
     constructor(
         sharedMemory: SharedArrayBuffer,
         config: HeaderPoolConfig
@@ -33,6 +52,34 @@ export class HeaderPoolWriter
 
         this.config = Object.freeze({
             ...config,
+        });
+
+        this._subHeaderNo();
+    }
+
+    readBlockNo(): number
+    {
+        return Atomics.load( this.u32View, TIP_BLOCK_NO_I32_IDX );
+    }
+
+    private async __subHeaderNo(): Promise<"ok" | "not-equal" | "timed-out">
+    {
+        return unwrapWaitAsyncResult(
+            Atomics.waitAsync(
+                this.int32View,
+                N_HEADERS_I32_IDX,
+                /// @ts-ignore error TS2345: Argument of type 'number' is not assignable to parameter of type 'bigint'.
+                Atomics.load( this.int32View, N_HEADERS_I32_IDX ),
+            )
+        )
+    }
+
+    private _subHeaderNo(): void
+    {
+        this.__subHeaderNo()
+        .then( res => {
+            this._subHeaderNo();
+            if( res === "ok" ) this.dispatchEvent( "free" );
         });
     }
 
@@ -67,9 +114,15 @@ export class HeaderPoolWriter
 
         this.u8View.set( hash, this.config.startHashesU8 + (idx * HASH_SIZE) );
         this.u8View.set( header, this.config.startHeadersU8 + (idx * this.config.maxHeaderSize) );
+        this._signalWrite();
 
         this._decrementWritingPeers();
         return HeaderPoolWriteResult.Ok;
+    }
+
+    private _signalWrite(): void
+    {
+        Atomics.notify( this.int32View, TIP_BLOCK_NO_I32_IDX );
     }
 
     private _isHashPresent( hash: Uint8Array, nHeaders: number ): boolean
@@ -133,4 +186,41 @@ export class HeaderPoolWriter
             Atomics.notify( this.int32View, WRITING_PEERS_I32_IDX );
         }
     }
+
+    dispatchEvent( name: HeaderPoolWriterEventName ): void
+    {
+        // one-time
+        let listeners = this._onceEvents[name];
+        if( !Array.isArray( listeners ) ) return;
+
+        for( const cb of listeners ) cb();
+        listeners.length = 0;
+        // persisting
+        listeners = this._onEvents[name];
+        for( const cb of listeners ) cb();
+    }
+
+    on( name: HeaderPoolWriterEventName, cb: HeaderPoolWriterEventCb ): void
+    {
+        this._onEvents[name]?.push( cb );
+    }
+
+    once( name: HeaderPoolWriterEventName, cb: HeaderPoolWriterEventCb ): void
+    {
+        this._onceEvents[name]?.push( cb );
+    }
+
+    off( name: HeaderPoolWriterEventName, cb: HeaderPoolWriterEventCb ): void
+    {
+        let listeners = this._onEvents[name];
+        if( !Array.isArray( listeners ) ) return;
+
+        let idx = listeners.indexOf( cb );
+        if( idx !== -1 ) listeners.splice( idx, 1 );
+
+        listeners = this._onceEvents[name];
+        idx = listeners.indexOf( cb );
+        if( idx !== -1 ) listeners.splice( idx, 1 );
+    }
+
 }

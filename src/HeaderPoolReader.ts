@@ -1,7 +1,17 @@
 import { unwrapWaitAsyncResult } from "./utils/unwrapWaitAsyncResult";
 import { getMaxPeersAllowed, getOptimalSize, isSupportedHeaderPoolSize } from "./types/SupportedHeaderPoolSize";
 import { HeaderPoolConfig, HeaderPoolReaderMemArgs, HeaderPoolReaderArgs, defaultConfig } from "./HeaderPoolConfig";
-import { HASH_SIZE, N_HEADERS_I32_IDX, N_MUTEX_BYTES, NOT_PERFORMING_DROP, PERFORMING_DROP, WRITING_PEERS_I32_IDX } from "./constants";
+import { HASH_SIZE, N_HEADERS_I32_IDX, N_MUTEX_BYTES, NOT_PERFORMING_DROP, PERFORMING_DROP, TIP_BLOCK_NO_I32_IDX, WRITING_PEERS_I32_IDX } from "./constants";
+
+type VoidCb = () => void;
+
+export interface HeaderPoolReaderEvents {
+    data: VoidCb[];
+}
+
+export type HeaderPoolReaderEventName = keyof HeaderPoolReaderEvents;
+
+export type HeaderPoolReaderEventCb = HeaderPoolReaderEvents[HeaderPoolReaderEventName][number];
 
 /**
  * given the number of peers and the full buffer size, returns the size allocated to the actual headers
@@ -35,27 +45,6 @@ export function getMaxPeers( maxHeaderSize: number, fullSize: number ): number
     while( getRequiredSpaceForPeers( nPeers ) <= fullSize ) nPeers++;
     return nPeers - 1;
 }
-
-/**
-```ts
-[
-    PERFORMING_DROP_mutex,                              // 4 bytes ( only i32 allows `Atomics.notify` and `Atomics.waitAsync` )
-    writing_peers_count,                                // 4 bytes ( `Atomics.notify` and `Atomics.waitAsync` on 0 )
-    append_queque,                                      // 4 bytes ( `Atomics.notify` and `Atomics.waitAsync` one at the time )
-    // tx_count ( 1 byte ) | aviable_space ( 3 bytes )  // 4 bytes, also `APPEND_INFO_BYTES`
-    tx_count | aviable_space,     
-
-    // end of mutex bytes (N_MUTEX_BYTES)
-
-    // length inferred by writing the following index
-    // last index length is inferred by `(size - startIndex) - aviableSpace`
-    // the first tx index is always `startHeadersU8` so we don't store it
-    ...indexes,         // 4 bytes each, 4 * (maxTxs - 1) total
-    ...hashes,          // 32 bytes each, 32 * maxTxs total
-    ...txs,             // variable size, up to `size - startHeadersU8`
-]
-```
-*/
 
 export class HeaderPoolReader
 {
@@ -95,6 +84,14 @@ export class HeaderPoolReader
         return [ this.sharedMemory, this.config ];
     }
 
+    private readonly _onceEvents: HeaderPoolReaderEvents = Object.freeze({
+        data: []
+    });
+
+    private readonly _onEvents: HeaderPoolReaderEvents = Object.freeze({
+        data: []
+    });
+    
     constructor(
         config: HeaderPoolReaderArgs = defaultConfig,
         sharedMemory: SharedArrayBuffer = HeaderPoolReader.getIntializedMemory( config )
@@ -133,6 +130,35 @@ export class HeaderPoolReader
             startHashesU8,
             startHeadersU8
         });
+
+        this._subTipBlockNo();
+    }
+
+    private async __subTipBlockNo(): Promise<"ok" | "not-equal" | "timed-out">
+    {
+        return unwrapWaitAsyncResult(
+            Atomics.waitAsync(
+                this.int32View,
+                N_HEADERS_I32_IDX,
+                /// @ts-ignore error TS2345: Argument of type 'number' is not assignable to parameter of type 'bigint'.
+                Atomics.load( this.int32View, TIP_BLOCK_NO_I32_IDX ),
+            )
+        );
+    }
+
+    private _subTipBlockNo(): void
+    {
+        this.__subTipBlockNo()
+        .then( res => {
+            this._subTipBlockNo();
+            if( res === "ok" ) this.dispatchEvent("data");
+        });
+    }
+
+    writeBlockNo( blockNo: number ): void
+    {
+        // Unsigned right shift (>>>) ensures unsigned int 32 bits
+        Atomics.store( this.u32View, TIP_BLOCK_NO_I32_IDX, blockNo >>> 0 );
     }
 
     private async _cloneMem(): Promise<Uint8Array>
@@ -157,6 +183,9 @@ export class HeaderPoolReader
     async getHeaders(): Promise<Uint8Array[]>
     {
         const mem = await this._cloneMem();
+        // worse case fills the pool and writers will wait again
+        this.requestHeaders();
+
         let offset = this.config.startHeadersU8;
         const u32View = new Uint32Array( mem.buffer );
 
@@ -174,12 +203,10 @@ export class HeaderPoolReader
         return arr;
     }
 
-    private _unsafe_read(): ArrayBuffer
+    /** returns the number of peers that received the notification */
+    requestHeaders(): number
     {
-        const buff = new ArrayBuffer( length );
-        const u8 = new Uint8Array( buff );
-        u8.set( this.u8View);
-        return buff;
+        return Atomics.notify( this.int32View, N_HEADERS_I32_IDX );
     }
 
     private async _makeSureNoWritingPeers(): Promise<void>
@@ -219,5 +246,39 @@ export class HeaderPoolReader
     private _getWritingPeers(): number
     {
         return Atomics.load( this.int32View, WRITING_PEERS_I32_IDX );
+    }
+
+    dispatchEvent( name: HeaderPoolReaderEventName ): void
+    {
+        // one-time
+        let listeners = this._onceEvents[name];
+        if( !Array.isArray( listeners ) ) return;
+        for( const cb of listeners ) cb();
+        listeners.length = 0;
+        // persisting
+        listeners = this._onEvents[name];
+        for( const cb of listeners ) cb();
+    }
+
+    on( name: HeaderPoolReaderEventName, cb: HeaderPoolReaderEventCb ): void
+    {
+        this._onEvents[name]?.push( cb );
+    }
+
+    once( name: HeaderPoolReaderEventName, cb: HeaderPoolReaderEventCb ): void
+    {
+        this._onceEvents[name]?.push( cb );
+    }
+
+    off( name: HeaderPoolReaderEventName, cb: HeaderPoolReaderEventCb ): void
+    {
+        let listeners = this._onEvents[name];
+        if( !Array.isArray( listeners ) ) return;
+        let idx = listeners.indexOf( cb );
+        if( idx !== -1 ) listeners.splice( idx, 1 );
+
+        listeners = this._onceEvents[name];
+        idx = listeners.indexOf( cb );
+        if( idx !== -1 ) listeners.splice( idx, 1 );
     }
 }
